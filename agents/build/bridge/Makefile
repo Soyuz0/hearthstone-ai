@@ -1,6 +1,6 @@
 CXX = g++
 
-REPO_ROOT = ../../../..
+REPO_ROOT = ../../..
 AGENTS_ROOT = $(REPO_ROOT)/agents
 
 CXXFLAGS = -std=c++17 -O3 -ggdb -march=native
@@ -22,7 +22,7 @@ JSON_WRITER_SRC = $(REPO_ROOT)/third_party/jsoncpp/src/json_writer.cpp
 NN_SRC = $(AGENTS_ROOT)/src/neural_net/NeuralNetwork.cpp
 DISPATCHER_SRC = $(AGENTS_ROOT)/test/CardDispatcher.cpp
 STATE_BUILDER_SRC = $(AGENTS_ROOT)/test/TestStateBuilder.cpp
-MAIN_SRC = $(AGENTS_ROOT)/test/e2e_test.cpp
+MAIN_SRC = $(AGENTS_ROOT)/src/bridge/bridge_main.cpp
 
 OBJS = \
 	$(OBJDIR)/json_value.o \
@@ -31,12 +31,12 @@ OBJS = \
 	$(OBJDIR)/NeuralNetwork.o \
 	$(OBJDIR)/CardDispatcher.o \
 	$(OBJDIR)/TestStateBuilder.o \
-	$(OBJDIR)/e2e_test.o
+	$(OBJDIR)/bridge_main.o
 
 CARDS_JSON = cards.json
 CARDS_JSON_SRC = $(REPO_ROOT)/engine/include/Cards/cards.json
 
-EXE = mcts_test
+EXE = hearthstone_bridge
 
 .PHONY: all clean
 
@@ -67,7 +67,7 @@ $(OBJDIR)/CardDispatcher.o: $(DISPATCHER_SRC) | $(OBJDIR)
 $(OBJDIR)/TestStateBuilder.o: $(STATE_BUILDER_SRC) | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(OBJDIR)/e2e_test.o: $(MAIN_SRC) | $(OBJDIR)
+$(OBJDIR)/bridge_main.o: $(MAIN_SRC) | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(EXE): $(OBJS)

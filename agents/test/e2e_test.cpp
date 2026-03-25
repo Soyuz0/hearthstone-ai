@@ -2,6 +2,7 @@
 #include <chrono>
 #include <iostream>
 #include <sstream>
+#include <thread>
 
 #include "engine/Game-impl.h"
 #include "Cards/PreIndexedCards.h"
