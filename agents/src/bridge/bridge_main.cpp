@@ -32,7 +32,7 @@ namespace {
 
 constexpr double kDefaultThinkSeconds = 1.0;
 constexpr int kDefaultThreads = 1;
-constexpr int kDefaultTreeSamples = 64;
+constexpr int kDefaultTreeSamples = 256;
 constexpr const char* kDefaultDeckType = "InnKeeperExpertWarlock";
 constexpr const char* kDefaultNeuralNetPath = "neural_net_bridge";
 constexpr bool kDefaultTreatNeuralNetAsRandom = true;
@@ -514,7 +514,6 @@ Json::Value ExtractBestActions(
 			action["choice"] = choice;
 
 			engine::ActionApplyHelper probe_helper = action_helper;
-			probe_helper.AppendChoice(choice);
 			std::mt19937 probe_rand(0);
 			state::State probe_state = state_restorer.RestoreState(probe_rand);
 			auto callback_info = probe_helper.ApplyChoices(probe_state);
@@ -532,7 +531,6 @@ Json::Value ExtractBestActions(
 			action["choice"] = choice;
 
 			engine::ActionApplyHelper probe_helper = action_helper;
-			probe_helper.AppendChoice(choice);
 			std::mt19937 probe_rand(0);
 			state::State probe_state = state_restorer.RestoreState(probe_rand);
 			auto callback_info = probe_helper.ApplyChoices(probe_state);
