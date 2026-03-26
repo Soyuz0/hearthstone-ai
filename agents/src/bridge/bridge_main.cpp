@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <chrono>
+#include <cctype>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -30,13 +32,24 @@ namespace {
 
 constexpr double kDefaultThinkSeconds = 1.0;
 constexpr int kDefaultThreads = 1;
-constexpr int kDefaultTreeSamples = 10;
+constexpr int kDefaultTreeSamples = 64;
 constexpr const char* kDefaultDeckType = "InnKeeperExpertWarlock";
 constexpr const char* kDefaultNeuralNetPath = "neural_net_bridge";
+constexpr bool kDefaultTreatNeuralNetAsRandom = true;
 
 bool StartsWith(std::string const& value, std::string const& prefix) {
 	if (value.size() < prefix.size()) return false;
 	return std::equal(prefix.begin(), prefix.end(), value.begin());
+}
+
+bool EnvFlagEnabled(char const* name) {
+	auto const* raw = std::getenv(name);
+	if (!raw) return false;
+	std::string value(raw);
+	std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+		return static_cast<char>(std::tolower(c));
+	});
+	return value == "1" || value == "true" || value == "yes" || value == "on";
 }
 
 std::string MainOpToChoiceType(engine::MainOpType op) {
@@ -118,11 +131,13 @@ void WriteJsonLine(Json::Value const& value) {
 	std::cout.flush();
 }
 
-bool EnsureNeuralNetFile(std::string const& path) {
+bool EnsureNeuralNetFile(std::string const& path, bool& created_file) {
+	created_file = false;
 	std::ifstream in(path);
 	if (in.good()) return true;
 	try {
 		neural_net::NeuralNetwork::CreateWithRandomWeights(path);
+		created_file = true;
 		return true;
 	}
 	catch (...) {
@@ -316,9 +331,11 @@ bool ConvertCompactPlayer(
 	Json::Value resource = compact["resource"];
 	int current = resource.get("current", 0).asInt();
 	int total = resource.get("total", 0).asInt();
+	int this_turn = std::max(0, current - total);
+	int used = std::max(0, total - current);
 	Json::Value crystal(Json::objectValue);
-	crystal["this_turn"] = 0;
-	crystal["used"] = std::max(0, total - current);
+	crystal["this_turn"] = this_turn;
+	crystal["used"] = used;
 	crystal["total"] = total;
 	crystal["overload"] = resource.get("overload", 0).asInt();
 	crystal["overload_next_turn"] = resource.get("overload_next", 0).asInt();
@@ -425,31 +442,30 @@ Json::Value ExtractBestActions(
 	agents::MCTSRunner& controller,
 	state::State const& start_state,
 	engine::view::board_view::StateRestorer& state_restorer) {
-	auto const* root = controller.GetRootNode(state::kPlayerFirst);
+	auto const root_side = start_state.GetCurrentPlayerId().GetSide();
+	auto const* root = controller.GetRootNode(root_side);
 	if (!root) return MakeError("MCTS root node unavailable");
 
 	if (!root->addon_.consistency_checker.CheckActionType(engine::ActionType::kMainAction)) {
 		return MakeError("MCTS root node has unexpected action type");
 	}
 
-	engine::ValidActionAnalyzer root_action_analyzer;
-	root_action_analyzer.Analyze(start_state);
-
 	engine::ActionApplyHelper action_helper;
 	Json::Value actions(Json::arrayValue);
-
-	auto make_callback_info = [&]() {
-		std::mt19937 restore_rand(0);
-		return action_helper.ApplyChoices([&]() {
-			return state_restorer.RestoreState(restore_rand);
-		});
-	};
 
 	auto const* node = root;
 	for (int depth = 0; depth < 64 && node; ++depth) {
 		auto best_choice = GetBestChoice(node);
 		if (!best_choice.has_value()) break;
 		int choice = *best_choice;
+
+		std::mt19937 traversal_rand(0);
+		state::State traversed_state = state_restorer.RestoreState(traversal_rand);
+		engine::Result traversal_result = engine::kResultInvalid;
+		action_helper.ApplyChoices(traversed_state, traversal_result);
+
+		engine::ValidActionAnalyzer action_analyzer;
+		action_analyzer.Analyze(traversed_state);
 
 		Json::Value action(Json::objectValue);
 		auto action_type = node->addon_.consistency_checker.GetActionType().GetType();
@@ -458,9 +474,9 @@ Json::Value ExtractBestActions(
 			action["type"] = "main_action";
 			action["choice"] = choice;
 
-			auto main_actions_count = root_action_analyzer.GetMainActionsCount();
+			auto main_actions_count = action_analyzer.GetMainActionsCount();
 			if (choice >= 0 && choice < main_actions_count) {
-				action["choice_type"] = MainOpToChoiceType(root_action_analyzer.GetMainOpType(choice));
+				action["choice_type"] = MainOpToChoiceType(action_analyzer.GetMainOpType(choice));
 			}
 			else {
 				action["choice_type"] = "Unknown";
@@ -470,13 +486,14 @@ Json::Value ExtractBestActions(
 			action["type"] = "choose_hand_card";
 			action["choice"] = choice;
 
-			auto const& playable = root_action_analyzer.GetPlayableCards();
+			auto const& playable = action_analyzer.GetPlayableCards();
 			if (choice >= 0 && choice < static_cast<int>(playable.size())) {
 				auto hand_index = static_cast<int>(playable[choice]);
 				action["hand_index"] = hand_index;
-				if (hand_index >= 0 && hand_index < static_cast<int>(start_state.GetCurrentPlayer().hand_.Size())) {
-					auto card_ref = start_state.GetCurrentPlayer().hand_.Get(static_cast<size_t>(hand_index));
-					auto card_id = static_cast<int>(start_state.GetCard(card_ref).GetCardId());
+				if (hand_index >= 0 && hand_index < static_cast<int>(traversed_state.GetCurrentPlayer().hand_.Size())) {
+					auto card_ref = traversed_state.GetCurrentPlayer().hand_.Get(static_cast<size_t>(hand_index));
+					auto card_id = static_cast<int>(traversed_state.GetCard(card_ref).GetCardId());
+					action["card_id"] = card_id;
 					if (card_id > 0) {
 						action["card_name"] = Cards::Database::GetInstance().Get(card_id).name;
 					}
@@ -486,12 +503,21 @@ Json::Value ExtractBestActions(
 		else if (action_type == engine::ActionType::kChooseAttacker) {
 			action["type"] = "choose_attacker";
 			action["choice"] = choice;
+
+			auto const& attackers = action_analyzer.GetAttackers();
+			if (choice >= 0 && choice < static_cast<int>(attackers.size())) {
+				action["encoded_attacker"] = attackers[choice];
+			}
 		}
 		else if (action_type == engine::ActionType::kChooseDefender) {
 			action["type"] = "choose_target";
 			action["choice"] = choice;
 
-			auto callback_info = make_callback_info();
+			engine::ActionApplyHelper probe_helper = action_helper;
+			probe_helper.AppendChoice(choice);
+			std::mt19937 probe_rand(0);
+			state::State probe_state = state_restorer.RestoreState(probe_rand);
+			auto callback_info = probe_helper.ApplyChoices(probe_state);
 			if (std::holds_alternative<engine::ActionApplyHelper::ChooseDefenderInfo>(callback_info)) {
 				auto const& info = std::get<engine::ActionApplyHelper::ChooseDefenderInfo>(callback_info);
 				if (choice >= 0 && choice < static_cast<int>(info.targets.size())) {
@@ -505,11 +531,15 @@ Json::Value ExtractBestActions(
 			action["type"] = "choose_target";
 			action["choice"] = choice;
 
-			auto callback_info = make_callback_info();
+			engine::ActionApplyHelper probe_helper = action_helper;
+			probe_helper.AppendChoice(choice);
+			std::mt19937 probe_rand(0);
+			state::State probe_state = state_restorer.RestoreState(probe_rand);
+			auto callback_info = probe_helper.ApplyChoices(probe_state);
 			if (std::holds_alternative<engine::ActionApplyHelper::GetSpecifiedTargetInfo>(callback_info)) {
 				auto const& info = std::get<engine::ActionApplyHelper::GetSpecifiedTargetInfo>(callback_info);
 				if (choice >= 0 && choice < static_cast<int>(info.targets.size())) {
-					int encoded = EncodeTarget(start_state, info.targets[choice]);
+					int encoded = EncodeTarget(probe_state, info.targets[choice]);
 					if (encoded >= 0) {
 						action["encoded_target"] = encoded;
 						action["target_desc"] = DescribeEncodedTarget(encoded);
@@ -631,14 +661,23 @@ bool InitializeBridge(
 
 	reverse_card_map = BuildReverseCardMap();
 
-	if (!EnsureNeuralNetFile(kDefaultNeuralNetPath)) {
+	bool created_neural_net_file = false;
+	if (!EnsureNeuralNetFile(kDefaultNeuralNetPath, created_neural_net_file)) {
 		error = "Failed to create/load neural network file";
 		return false;
 	}
 
+	bool disable_net_bias = kDefaultTreatNeuralNetAsRandom;
+	if (EnvFlagEnabled("PETER_BRIDGE_USE_TRAINED_NET")) {
+		disable_net_bias = false;
+	}
+	if (created_neural_net_file) {
+		disable_net_bias = true;
+	}
+
 	config.threads = kDefaultThreads;
 	config.tree_samples = kDefaultTreeSamples;
-	config.mcts.SetNeuralNetPath(kDefaultNeuralNetPath);
+	config.mcts.SetNeuralNetPath(kDefaultNeuralNetPath, disable_net_bias);
 	return true;
 }
 
